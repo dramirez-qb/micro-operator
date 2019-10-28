@@ -3,6 +3,7 @@ package micro
 import (
 	"context"
 	"reflect"
+	"sync"
 
 	microv1alpha1 "github.com/micro/micro-operator/pkg/apis/micro/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -23,9 +24,6 @@ import (
 // configure operator logger
 var log = logf.Log.WithName("micro")
 
-// platform tracks Micro platform deployments
-var platform = make(map[string]*appsv1.Deployment)
-
 // Add creates a new Micro Controller and adds it to the Manager.
 // The Manager will set fields on the Controller and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
@@ -34,7 +32,20 @@ func Add(mgr manager.Manager) error {
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	return &ReconcileMicro{client: mgr.GetClient(), scheme: mgr.GetScheme()}
+	r := &ReconcileMicro{
+		client: mgr.GetClient(),
+		scheme: mgr.GetScheme(),
+		micro:  make(map[string]*appsv1.Deployment),
+	}
+
+	// get a list of existing dpeloyments and populate
+	// reconciler.micro
+
+	// TODO: launch a goroutine that
+	// - monitors some remote URL
+	// - if it detects new hub build it triggers new deployment
+
+	return r
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -73,6 +84,10 @@ type ReconcileMicro struct {
 	// that reads objects from the cache and writes to the apiserver
 	client client.Client
 	scheme *runtime.Scheme
+	// micro deployments
+	// NOTE: Operator is single threaded so probably doesnt need mutex
+	sync.RWMutex
+	micro map[string]*appsv1.Deployment
 }
 
 // Reconcile reads that state of the cluster for a Micro object and makes changes based on the state read
@@ -84,7 +99,10 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 	reqLogger := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name)
 	reqLogger.Info("Reconciling Micro")
 
-	// Fetch the Micro resource instance
+	// kind of micro CRD: micro-api, etc.
+	kind := request.Name
+
+	// Fetch the Micro CRD instance
 	micro := &microv1alpha1.Micro{}
 	err := r.client.Get(context.TODO(), request.NamespacedName, micro)
 	if err != nil {
@@ -92,10 +110,11 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 			// Custom Resource object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
-			reqLogger.Info("Micro resource not found. Ignoring since object must have been deleted")
+			reqLogger.Info("No Micro resource found. Ignoring since CRD object must have been deleted")
 			// if it no longer exists, remove it from the platform deployments
-			microKind := micro.Name + "-" + micro.Kind
-			delete(platform, microKind)
+			r.Lock()
+			delete(r.micro, kind)
+			r.Unlock()
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
@@ -103,20 +122,23 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 		return reconcile.Result{}, err
 	}
 
-	// Check if this Micro Deployment already exists
+	// Check if particular Micro Deployment already exists
 	found := &appsv1.Deployment{}
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: micro.Name, Namespace: micro.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		// check if we have the deployment for this dep stored, if yes make sure we create it
-		microKind := micro.Name + "-" + micro.Kind
-		if dep, ok := platform[microKind]; ok {
+		r.RLock()
+		// check if we are tracking the deployment
+		if dep, ok := r.micro[kind]; ok {
 			reqLogger.Info("Micro Deployment", "Micro.Kind", micro.Kind, "Micro.Namespace", micro.Namespace, "Micro.Name", micro.Name)
 			// create platform deployment
 			err = r.client.Create(context.TODO(), dep)
 			if err != nil {
+				r.RUnlock()
 				return reconcile.Result{}, err
 			}
 		}
+		r.RUnlock()
 		// Deployment created successfully - don't requeue
 		return reconcile.Result{Requeue: true}, nil
 	} else if err != nil {
@@ -125,14 +147,16 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 	}
 
 	// store the deployment and make it the owner of its resources
-	if _, ok := platform[micro.Name+"-"+micro.Kind]; !ok {
-		microKind := micro.Name + "-" + micro.Kind
-		platform[microKind] = found
+	r.Lock()
+	if _, ok := r.micro[kind]; !ok {
+		r.micro[kind] = found
 		// Set Micro micro as the owner and controller
 		if err := controllerutil.SetControllerReference(micro, found, r.scheme); err != nil {
+			r.Unlock()
 			return reconcile.Result{}, err
 		}
 	}
+	r.Unlock()
 
 	// Ensure the deployment size is the same as the spec
 	size := micro.Spec.Size
@@ -150,7 +174,7 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 	// Update the Micro status with the pod names
 	// List the pods for this micro deployment
 	labels := map[string]string{
-		"name": micro.Name + "-" + micro.Kind,
+		"name": kind,
 	}
 	podList := &corev1.PodList{}
 	listOpts := []client.ListOption{
