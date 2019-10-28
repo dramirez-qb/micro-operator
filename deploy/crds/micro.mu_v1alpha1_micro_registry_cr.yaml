@@ -1,0 +1,6 @@
+apiVersion: micro.mu/v1alpha1
+kind: Micro
+metadata:
+  name: micro-registry
+spec:
+  size: 3

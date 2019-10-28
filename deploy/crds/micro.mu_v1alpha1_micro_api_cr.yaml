@@ -1,0 +1,6 @@
+apiVersion: micro.mu/v1alpha1
+kind: Micro
+metadata:
+  name: micro-api
+spec:
+  size: 1
