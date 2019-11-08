@@ -24,28 +24,13 @@ import (
 // configure operator logger
 var log = logf.Log.WithName("micro")
 
+// blank assignment to verify that ReconcileMicro implements reconcile.Reconciler
+var _ reconcile.Reconciler = &ReconcileMicro{}
+
 // Add creates a new Micro Controller and adds it to the Manager.
 // The Manager will set fields on the Controller and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
 	return add(mgr, newReconciler(mgr))
-}
-
-// newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	r := &ReconcileMicro{
-		client: mgr.GetClient(),
-		scheme: mgr.GetScheme(),
-		micro:  make(map[string]*appsv1.Deployment),
-	}
-
-	// get a list of existing dpeloyments and populate
-	// reconciler.micro
-
-	// TODO: launch a goroutine that
-	// - monitors some remote URL
-	// - if it detects new hub build it triggers new deployment
-
-	return r
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -63,7 +48,6 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to secondary Micro resources
-	//err = c.Watch(&source.Kind{Type: &microv1alpha1.Micro{}}, &handler.EnqueueRequestForOwner{
 	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
 		OwnerType:    &microv1alpha1.Micro{},
@@ -75,12 +59,9 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	return nil
 }
 
-// blank assignment to verify that ReconcileMicro implements reconcile.Reconciler
-var _ reconcile.Reconciler = &ReconcileMicro{}
-
 // ReconcileMicro reconciles a Micro object
 type ReconcileMicro struct {
-	// This client, initialized using mgr.Client() above, is a split client
+	// This client, initialized using mgr.Client(), is a split client
 	// that reads objects from the cache and writes to the apiserver
 	client client.Client
 	scheme *runtime.Scheme
@@ -88,6 +69,21 @@ type ReconcileMicro struct {
 	// NOTE: Operator is single threaded so probably doesnt need mutex
 	sync.RWMutex
 	micro map[string]*appsv1.Deployment
+}
+
+// newReconciler returns a new reconcile.Reconciler
+func newReconciler(mgr manager.Manager) reconcile.Reconciler {
+	r := &ReconcileMicro{
+		client: mgr.GetClient(),
+		scheme: mgr.GetScheme(),
+		micro:  make(map[string]*appsv1.Deployment),
+	}
+
+	// TODO: launch a goroutine that
+	// - monitors some remote URL
+	// - if it detects new hub build it triggers new deployment
+
+	return r
 }
 
 // Reconcile reads that state of the cluster for a Micro object and makes changes based on the state read
@@ -118,7 +114,7 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
-		reqLogger.Error(err, "Failed to get Micro")
+		reqLogger.Error(err, "Failed to get Micro", "Micro.Kind", kind)
 		return reconcile.Result{}, err
 	}
 
@@ -128,9 +124,10 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 	if err != nil && errors.IsNotFound(err) {
 		// check if we have the deployment for this dep stored, if yes make sure we create it
 		r.RLock()
-		// check if we are tracking the deployment
+		// check if we are tracking the deployment already
+		// if yes attempt to reoncile non-existent micro resource
 		if dep, ok := r.micro[kind]; ok {
-			reqLogger.Info("Micro Deployment", "Micro.Kind", micro.Kind, "Micro.Namespace", micro.Namespace, "Micro.Name", micro.Name)
+			reqLogger.Info("Micro Deployment", "Micro.Kind", micro.Kind, "Micro.Namespace", micro.Namespace)
 			// create platform deployment
 			err = r.client.Create(context.TODO(), dep)
 			if err != nil {
@@ -164,7 +161,7 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 		found.Spec.Replicas = &size
 		err = r.client.Update(context.TODO(), found)
 		if err != nil {
-			reqLogger.Error(err, "Failed to update Micro", "Micro.Namespace", found.Namespace, "Micro.Name", found.Name)
+			reqLogger.Error(err, "Failed to update Micro", "Micro.Kind", micro.Kind, "Micro.Namespace", micro.Namespace)
 			return reconcile.Result{}, err
 		}
 		// Spec updated - return and requeue
@@ -182,7 +179,7 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 		client.MatchingLabels(labels),
 	}
 	if err = r.client.List(context.TODO(), podList, listOpts...); err != nil {
-		reqLogger.Error(err, "Failed to list Micro pods", "Micro.Namespace", micro.Namespace, "Micro.Name", micro.Name)
+		reqLogger.Error(err, "Failed to list Micro pods", "Micro.Kind", micro.Kind, "Micro.Namespace", micro.Namespace)
 		return reconcile.Result{}, err
 	}
 
@@ -203,6 +200,6 @@ func (r *ReconcileMicro) Reconcile(request reconcile.Request) (reconcile.Result,
 	}
 
 	// Pod already exists - don't requeue
-	reqLogger.Info("Skip reconcile: Micro Deployment already exists", "Micro.Namespace", found.Namespace, "Micro.Name", found.Name)
+	reqLogger.Info("Skip reconcile: Micro Deployment already exists", "Micro.Kind", micro.Kind, "Micro.Namespace", micro.Namespace)
 	return reconcile.Result{}, nil
 }
